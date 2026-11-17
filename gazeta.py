@@ -3,9 +3,10 @@ import os, re, json, html, sys, datetime, traceback, urllib.request
 import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
-KEY = os.environ.get("DASHBOARD_KEY", "")
+# strip/очистка: на случай, если в секрет случайно попали пробелы, кавычки или ```
+TOKEN = re.sub(r"[^\w:-]", "", os.environ.get("TELEGRAM_TOKEN", ""))
+CHAT = re.sub(r"[^\d-]", "", os.environ.get("TELEGRAM_CHAT_ID", "")) or "908434474"
+KEY = os.environ.get("DASHBOARD_KEY", "").strip()
 REPO = os.environ.get("GITHUB_REPOSITORY", "user/gazeta")
 SERVER = "https://home-dashboard.dzyn.workers.dev/api"
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -248,9 +249,37 @@ footer{{text-align:center;color:var(--sub);font-size:12px;margin-top:16px}}
 </main></body></html>"""
 
 
-def send(text, url):
+def tg(method, payload=None):
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TOKEN}/{method}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        return json.loads(r.read())
+
+
+def diagnose():
+    """Пишет в лог, какой бот в токене и кто ему писал — чтобы сразу видеть причину."""
+    try:
+        me = tg("getMe")["result"]
+        log(f"Бот в токене: @{me.get('username')}")
+    except Exception as e:
+        log(f"Токен не работает: {e}")
+        return None
+    try:
+        ups = tg("getUpdates").get("result", [])
+        chats = {str(u[k]["chat"]["id"]) for u in ups for k in ("message", "edited_message") if k in u}
+        log(f"Номер чата из секрета: {len(CHAT)} цифр, начинается на {CHAT[:3]}…")
+        log(f"Боту писали из чатов: {', '.join(c[:3] + '…' for c in chats) or 'никто (напиши боту /start)'}")
+        return next(iter(chats)) if len(chats) == 1 else None
+    except Exception as e:
+        log(f"getUpdates: {e}")
+        return None
+
+
+def send(text, url, chat=None):
     data = json.dumps({
-        "chat_id": CHAT, "text": text, "parse_mode": "HTML",
+        "chat_id": chat or CHAT, "text": text, "parse_mode": "HTML",
         "reply_markup": {"inline_keyboard": [[{"text": "📰 Открыть газету", "url": url}]]},
     }).encode()
     req = urllib.request.Request(f"https://api.telegram.org/bot{TOKEN}/sendMessage", data=data,
@@ -291,7 +320,15 @@ def main():
         msg += f"🌤 {sign(W.get('temp'))}°, {esc(str(W.get('text', '')))}"
         if W.get("umbrella"):
             msg += " · ☔ возьми зонт"
-    send(msg, url)
+    try:
+        send(msg, url)
+    except urllib.error.HTTPError:
+        fallback = diagnose()
+        if fallback and fallback != CHAT:
+            log("Пробую отправить в чат, из которого писали боту…")
+            send(msg, url, fallback)
+        else:
+            raise
 
     if problems:
         log("\nЧто не загрузилось (газета всё равно ушла):")
