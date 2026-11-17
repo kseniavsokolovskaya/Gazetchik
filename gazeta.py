@@ -192,16 +192,50 @@ def sign(v):
         return str(v)
 
 
-def news_list(items, empty="Сегодня не загрузилось"):
+def news_list(items, empty="Сегодня новости не загрузились"):
     if not items:
         return f'<p class="sub">{empty}</p>'
-    return "<ul>" + "".join(
-        f'<li><a href="{esc(i["link"])}">{esc(i["title"])}</a>'
-        + (f'<span class="also">также: {esc(", ".join(i["also"]))}</span>' if i.get("also") else "")
-        + "</li>" for i in items) + "</ul>"
+    out = ""
+    for i in items:
+        meta = esc(i.get("src", ""))
+        if i.get("also"):
+            meta += " · также: " + esc(", ".join(i["also"]))
+        out += f'<li><a href="{esc(i["link"])}">{esc(i["title"])}</a><span class="also">{meta}</span></li>'
+    return "<ul>" + out + "</ul>"
 
 
-def build(d, feeds, channels, now):
+def mix(groups, limit=15):
+    """Перемешивает источники по очереди, чтобы сверху не было пять новостей подряд из одного места."""
+    out, i = [], 0
+    while len(out) < limit and any(i < len(g) for g in groups):
+        for g in groups:
+            if i < len(g) and len(out) < limit:
+                out.append(g[i])
+        i += 1
+    return out
+
+
+FX_FILE = "docs/fx.json"
+
+
+def fx_compare(X, today_str):
+    """Достаёт вчерашний курс из docs/fx.json и записывает сегодняшний."""
+    try:
+        hist = json.load(open(FX_FILE, encoding="utf-8"))
+    except Exception:
+        hist = {}
+    past = sorted(d for d in hist if d < today_str)
+    prev = hist[past[-1]] if past else {}
+    if X:
+        hist[today_str] = {k: X[k].get("buy") for k in ("usd", "eur") if X.get(k)}
+        hist = {d: hist[d] for d in sorted(hist)[-30:]}  # храним месяц
+        os.makedirs("docs", exist_ok=True)
+        json.dump(hist, open(FX_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    return prev
+
+
+def build(d, news, now, prev_fx=None):
+    prev_fx = prev_fx or {}
     today_str = now.strftime("%Y-%m-%d")
     months = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля",
               "августа", "сентября", "октября", "ноября", "декабря"]
@@ -237,22 +271,28 @@ def build(d, feeds, channels, now):
     else:
         weather = '<section class="card half"><h2>🌤 Киев</h2><p class="sub">Погода недоступна</p></section>'
 
-    # Курс
+    # Курс + изменение со вчера
     X = d.get("fx") or {}
+    f = lambda v: "—" if v is None else f"{v:.2f}"
     rows = ""
-    for k, s in (("usd", "$"), ("eur", "€")):
+    for k, sym in (("usd", "$"), ("eur", "€")):
         if X.get(k):
-            f = lambda v: "—" if v is None else f"{v:.2f}"
-            rows += f'<div class="fx"><span class="cur">{s}</span><span>{f(X[k].get("buy"))}</span><span class="sub">{f(X[k].get("sell"))}</span></div>'
-    fx = f'<section class="card half"><h2>💵 Курс</h2>{rows or "<p class=sub>нет данных</p>"}<p class="sub small">покупка · продажа</p></section>'
+            buy, old = X[k].get("buy"), prev_fx.get(k)
+            delta = ""
+            if buy is not None and old is not None:
+                diff = buy - old
+                if abs(diff) < 0.005:
+                    delta = '<span class="d same">= без изм.</span>'
+                elif diff > 0:
+                    delta = f'<span class="d up">▲ {diff:.2f}</span>'
+                else:
+                    delta = f'<span class="d down">▼ {abs(diff):.2f}</span>'
+            rows += (f'<div class="fx"><span class="cur">{sym}</span><span>{f(buy)}</span>'
+                     f'<span class="sub">{f(X[k].get("sell"))}</span></div>{delta}')
+    note = "покупка · продажа · к вчера" if prev_fx else "покупка · продажа<br>сравнение со вчера появится завтра"
+    fx = f'<section class="card half"><h2>💵 Курс</h2>{rows or "<p class=sub>нет данных</p>"}<p class="sub small">{note}</p></section>'
 
-    news = "".join(
-        f'<section class="card"><h2>📰 <a href="{esc(site)}">{esc(name)}</a></h2>{news_list(items)}</section>'
-        for name, site, items in feeds)
-    tg = "".join(
-        f'<h3><a href="https://t.me/{h}">{esc(name)}</a></h3>{news_list(items, "Постов не видно")}'
-        for name, h, items in channels)
-    tg = f'<section class="card"><h2>📈 Финансы · Telegram</h2>{tg}</section>'
+    news_block = f'<section class="card"><h2>📈 Бизнес и финансы</h2>{news_list(news)}</section>'
 
     return f"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8">
@@ -280,7 +320,7 @@ p{{margin:4px 0}} .sub{{color:var(--sub);font-size:14px}} .small{{font-size:12px
 .ticks{{display:flex;justify-content:space-between;font-size:11px;color:var(--sub);margin-top:2px}}
 .fx{{display:flex;gap:8px;align-items:baseline;font-size:18px;font-weight:600}} .fx .cur{{color:var(--olive);width:14px}}
 .fx .sub{{font-size:13px;font-weight:400}}
-ul{{margin:0;padding-left:18px}} li{{margin:6px 0}} .also{{display:block;font-size:12px;color:var(--sub)}}
+ul{{margin:0;padding-left:18px}} li{{margin:8px 0}} .d{{display:block;font-size:12px;margin:-2px 0 4px 22px}} .up{{color:var(--warn)}} .down{{color:var(--olive)}} .same{{color:var(--sub)}} .also{{display:block;font-size:12px;color:var(--sub)}}
 a{{color:var(--text)}} li a{{text-decoration:none;border-bottom:1px solid var(--maybe)}}
 footer{{text-align:center;color:var(--sub);font-size:12px;margin-top:16px}}
 @media (max-width:420px){{.grid{{flex-direction:column}} .grid .half:last-child{{flex:auto}}}}
@@ -288,8 +328,7 @@ footer{{text-align:center;color:var(--sub);font-size:12px;margin-top:16px}}
 <header><h1>Ранок</h1><p>{date_h}</p></header>
 {light}
 <div class="grid">{weather}{fx}</div>
-{news}
-{tg}
+{news_block}
 <footer>Выпуск собран в {now.strftime('%H:%M')} · новости ведут на оригинал</footer>
 </main></body></html>"""
 
@@ -347,13 +386,16 @@ def main():
     d = load_dash()
     feeds = [(name, site, load_feed(urls)) for name, site, urls in FEEDS]
     channels = [(name, h, load_channel(h)) for name, h in CHANNELS]
-    cleaned = dedupe([(n, items) for n, _, items in feeds] + [(n, items) for n, _, items in channels])
-    feeds = [(n, site, cleaned[i]) for i, (n, site, _) in enumerate(feeds)]
-    channels = [(n, h, cleaned[len(feeds) + i]) for i, (n, h, _) in enumerate(channels)]
+    groups = [(n, items) for n, _, items in feeds] + [(n, items) for n, _, items in channels]
+    for n, items in groups:
+        for it in items:
+            it["src"] = n
+    news = mix(dedupe(groups))
+    prev_fx = fx_compare(d.get("fx"), now.strftime("%Y-%m-%d"))
 
     os.makedirs("docs", exist_ok=True)
     with open("docs/index.html", "w", encoding="utf-8") as f:
-        f.write(build(d, feeds, channels, now))
+        f.write(build(d, news, now, prev_fx))
     log("Страница собрана: docs/index.html")
 
     user, repo = REPO.split("/")
