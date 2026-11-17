@@ -7,6 +7,12 @@ from zoneinfo import ZoneInfo
 TOKEN = re.sub(r"[^\w:-]", "", os.environ.get("TELEGRAM_TOKEN", ""))
 CHAT = re.sub(r"[^\d-]", "", os.environ.get("TELEGRAM_CHAT_ID", "")) or "908434474"
 KEY = os.environ.get("DASHBOARD_KEY", "").strip()
+LUNO_URL = os.environ.get("LUNO_URL", "").strip().rstrip("/")
+_m = re.search(r"project/([a-z0-9]{15,})", LUNO_URL) or (re.fullmatch(r"[a-z0-9]{15,}", LUNO_URL) and re.match(r"(.*)", LUNO_URL))
+if _m:  # вставили ссылку на дашборд или только ID проекта — соберём адрес сами
+    LUNO_URL = f"https://{_m.group(1)}.supabase.co"
+LUNO_KEY = os.environ.get("LUNO_ANON_KEY", "").strip()
+LUNO_SECRET = os.environ.get("LUNO_SECRET", "").strip()
 REPO = os.environ.get("GITHUB_REPOSITORY", "user/gazeta")
 SERVER = "https://home-dashboard.dzyn.workers.dev/api"
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -109,6 +115,53 @@ def load_channel(handle, n=3):
         return []
 
 
+def load_luno():
+    """Задачи LUNO, запланированные на сегодня (функция gazeta_today в Supabase)."""
+    if not (LUNO_URL and LUNO_KEY and LUNO_SECRET):
+        log("LUNO: секреты не заданы, блок пропущен")
+        return None
+    try:
+        req = urllib.request.Request(
+            f"{LUNO_URL}/rest/v1/rpc/gazeta_today",
+            data=json.dumps({"secret": LUNO_SECRET}).encode(),
+            headers={"apikey": LUNO_KEY, "Content-Type": "application/json",
+                     # старый ключ anon (JWT, начинается на eyJ) нужен и в Authorization;
+                     # новый publishable (sb_publishable_…) — только в apikey
+                     **({"Authorization": f"Bearer {LUNO_KEY}"} if LUNO_KEY.startswith("eyJ") else {})})
+        with urllib.request.urlopen(req, timeout=25) as r:
+            tasks = json.loads(r.read())
+        if isinstance(tasks, str):
+            tasks = json.loads(tasks)
+        log(f"LUNO: задач на сегодня {len(tasks)}")
+        return tasks
+    except urllib.error.HTTPError as e:
+        problems.append(f"LUNO: {e.code} {e.read().decode('utf-8', 'ignore')[:200]}")
+    except Exception as e:
+        problems.append(f"LUNO: {e}")
+    return None
+
+
+def luno_block(tasks):
+    if tasks is None:
+        return ""
+    if not tasks:
+        return '<section class="card"><h2>🌙 LUNO · сегодня</h2><p class="sub">На сегодня ничего не запланировано</p></section>'
+    left = [t for t in tasks if not t.get("done")]
+    done = [t for t in tasks if t.get("done")]
+    li = ""
+    for t in left + done:
+        icon = "✓" if t.get("done") else "○"
+        fam = f' <span class="sub">· {esc(str(t.get("familiar_icon") or ""))} {esc(t["familiar"])}</span>' if t.get("familiar") else ""
+        xp = f'<span class="xp">+{t["xp"]} XP</span>' if t.get("xp") else ""
+        tag = {"overdue": '<span class="tag red">просрочено</span>',
+               "deadline": '<span class="tag org">дедлайн сегодня</span>',
+               "due": '<span class="tag">🔁</span>'}.get(t.get("status"), "")
+        fam = tag + fam
+        li += f'<li class="task{" done" if t.get("done") else ""}"><span class="chk">{icon}</span><span class="tn">{esc(str(t.get("name", "")))}{fam}</span>{xp}</li>'
+    head = f"осталось {len(left)} из {len(tasks)}" if done else f"{len(tasks)} {'квест' if len(tasks) == 1 else 'квеста' if len(tasks) < 5 else 'квестов'}"
+    return f'<section class="card"><h2>🌙 LUNO · сегодня <span class="sub small">· {head}</span></h2><ul class="tasks">{li}</ul></section>'
+
+
 # ---------------- свет ----------------
 def pick_days(P, today_str):
     today, tomorrow = P.get("today"), P.get("tomorrow")
@@ -192,7 +245,18 @@ def sign(v):
         return str(v)
 
 
-def news_list(items, empty="Сегодня новости не загрузились"):
+TITLE_MAX = 90  # максимальная длина заголовка в газете
+
+
+def short(t, n=TITLE_MAX):
+    t = re.sub(r"^[^\wА-Яа-яІіЇїЄєҐґ«\"(]+", "", t).strip()  # эмодзи и значки в начале
+    if len(t) <= n:
+        return t
+    cut = t[:n].rsplit(" ", 1)[0].rstrip(",.:;—–- ")
+    return cut + "…"
+
+
+def news_list(items, empty="Свежих новостей с прошлого выпуска нет"):
     if not items:
         return f'<p class="sub">{empty}</p>'
     out = ""
@@ -200,7 +264,7 @@ def news_list(items, empty="Сегодня новости не загрузил�
         meta = esc(i.get("src", ""))
         if i.get("also"):
             meta += " · также: " + esc(", ".join(i["also"]))
-        out += f'<li><a href="{esc(i["link"])}">{esc(i["title"])}</a><span class="also">{meta}</span></li>'
+        out += f'<li><a href="{esc(i["link"])}">{esc(short(i["title"]))}</a><span class="also">{meta}</span></li>'
     return "<ul>" + out + "</ul>"
 
 
@@ -213,6 +277,34 @@ def mix(groups, limit=15):
                 out.append(g[i])
         i += 1
     return out
+
+
+SEEN_FILE = "docs/seen.json"
+SEEN_DAYS = 7  # сколько дней помнить показанные новости
+
+
+def drop_seen(items, today_str):
+    """Убирает новости, которые уже были в прошлых выпусках (по ссылке или похожему заголовку).
+    Сегодняшние повторные запуски не считаются — иначе пробный запуск съел бы утренний выпуск."""
+    try:
+        seen = json.load(open(SEEN_FILE, encoding="utf-8"))
+    except Exception:
+        seen = {}
+    old = [x for day, xs in seen.items() if day < today_str for x in xs]
+    old_links = {x["link"] for x in old}
+    old_words = [set(x["words"]) for x in old]
+    fresh = [it for it in items
+             if it["link"] not in old_links and not any(same(words(it["title"]), w) for w in old_words)]
+    if len(fresh) < len(items):
+        log(f"Уже были во вчерашних выпусках: {len(items) - len(fresh)}")
+    return fresh, seen
+
+
+def save_seen(seen, shown, today_str):
+    seen[today_str] = [{"link": i["link"], "words": sorted(words(i["title"]))} for i in shown]
+    keep = sorted(seen)[-SEEN_DAYS:]
+    os.makedirs("docs", exist_ok=True)
+    json.dump({d: seen[d] for d in keep}, open(SEEN_FILE, "w", encoding="utf-8"), ensure_ascii=False)
 
 
 FX_FILE = "docs/fx.json"
@@ -228,13 +320,13 @@ def fx_compare(X, today_str):
     prev = hist[past[-1]] if past else {}
     if X:
         hist[today_str] = {k: X[k].get("buy") for k in ("usd", "eur") if X.get(k)}
-        hist = {d: hist[d] for d in sorted(hist)[-30:]}  # храним месяц
+        hist = {d: hist[d] for d in sorted(hist)[-7:]}  # храним неделю
         os.makedirs("docs", exist_ok=True)
         json.dump(hist, open(FX_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     return prev
 
 
-def build(d, news, now, prev_fx=None):
+def build(d, news, now, prev_fx=None, luno=None):
     prev_fx = prev_fx or {}
     today_str = now.strftime("%Y-%m-%d")
     months = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля",
@@ -320,13 +412,14 @@ p{{margin:4px 0}} .sub{{color:var(--sub);font-size:14px}} .small{{font-size:12px
 .ticks{{display:flex;justify-content:space-between;font-size:11px;color:var(--sub);margin-top:2px}}
 .fx{{display:flex;gap:8px;align-items:baseline;font-size:18px;font-weight:600}} .fx .cur{{color:var(--olive);width:14px}}
 .fx .sub{{font-size:13px;font-weight:400}}
-ul{{margin:0;padding-left:18px}} li{{margin:8px 0}} .d{{display:block;font-size:12px;margin:-2px 0 4px 22px}} .up{{color:var(--warn)}} .down{{color:var(--olive)}} .same{{color:var(--sub)}} .also{{display:block;font-size:12px;color:var(--sub)}}
+ul{{margin:0;padding-left:18px}} li{{margin:8px 0}} ul.tasks{{list-style:none;padding:0}} .task{{display:flex;gap:8px;align-items:baseline}} .chk{{color:var(--olive);font-weight:700;width:14px}} .tn{{flex:1}} .xp{{font-size:12px;color:var(--olive)}} .tag{{font-size:11px;margin-left:6px;color:var(--sub)}} .tag.red{{color:var(--warn);font-weight:600}} .tag.org{{color:#C47A1C;font-weight:600}} .task.done .tn{{text-decoration:line-through;color:var(--sub)}} .d{{display:block;font-size:12px;margin:-2px 0 4px 22px}} .up{{color:var(--warn)}} .down{{color:var(--olive)}} .same{{color:var(--sub)}} .also{{display:block;font-size:12px;color:var(--sub)}}
 a{{color:var(--text)}} li a{{text-decoration:none;border-bottom:1px solid var(--maybe)}}
 footer{{text-align:center;color:var(--sub);font-size:12px;margin-top:16px}}
 @media (max-width:420px){{.grid{{flex-direction:column}} .grid .half:last-child{{flex:auto}}}}
 </style></head><body><main>
 <header><h1>Ранок</h1><p>{date_h}</p></header>
 {light}
+{luno_block(luno)}
 <div class="grid">{weather}{fx}</div>
 {news_block}
 <footer>Выпуск собран в {now.strftime('%H:%M')} · новости ведут на оригинал</footer>
@@ -390,12 +483,20 @@ def main():
     for n, items in groups:
         for it in items:
             it["src"] = n
-    news = mix(dedupe(groups))
+    today_str = now.strftime("%Y-%m-%d")
+    seen = {}
+    filtered = []
+    for n, items in groups:
+        fresh, seen = drop_seen(items, today_str)
+        filtered.append((n, fresh))
+    news = mix(dedupe(filtered))
+    save_seen(seen, news, today_str)
+    luno = load_luno()
     prev_fx = fx_compare(d.get("fx"), now.strftime("%Y-%m-%d"))
 
     os.makedirs("docs", exist_ok=True)
     with open("docs/index.html", "w", encoding="utf-8") as f:
-        f.write(build(d, news, now, prev_fx))
+        f.write(build(d, news, now, prev_fx, luno))
     log("Страница собрана: docs/index.html")
 
     user, repo = REPO.split("/")
@@ -410,6 +511,8 @@ def main():
         msg += f"🌤 {sign(W.get('temp'))}°, {esc(str(W.get('text', '')))}"
         if W.get("umbrella"):
             msg += " · ☔ возьми зонт"
+    if luno:
+        msg = msg.rstrip("\n") + f"\n🌙 LUNO: на сегодня {len(luno)} — " + ", ".join(esc(str(t.get('name', ''))) for t in luno[:3]) + ("…" if len(luno) > 3 else "")
     try:
         send(msg, url)
     except urllib.error.HTTPError:
