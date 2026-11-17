@@ -13,7 +13,10 @@ KYIV = ZoneInfo("Europe/Kyiv")
 
 # Новости с сайтов (RSS)
 FEEDS = [
-    ("MC.today", "https://mc.today", ["https://mc.today/feed/", "https://mc.today/uk/feed/"]),
+    # сайт MC.today не пускает серверы GitHub (Forbidden), поэтому берём его статьи через Google Новости
+    ("MC.today", "https://mc.today", [
+        "https://news.google.com/rss/search?q=site:mc.today+when:2d&hl=uk&gl=UA&ceid=UA:uk",
+        "https://mc.today/feed/"]),
     ("КОШТ", "https://kosht.media", ["https://kosht.media/feed/"]),
 ]
 # Telegram-каналы про финансы (последние посты)
@@ -59,7 +62,7 @@ def load_feed(urls, n=5):
             root = ET.fromstring(get(url))
             items = []
             for it in root.iter("item"):
-                t = (it.findtext("title") or "").strip()
+                t = re.sub(r"\s+[-–—]\s+[^-–—]{2,40}$", "", (it.findtext("title") or "").strip()) if "news.google" in url else (it.findtext("title") or "").strip()
                 l = (it.findtext("link") or "").strip()
                 if t and l:
                     items.append({"title": t, "link": l})
@@ -141,6 +144,46 @@ def bar(day, now_min=None):
     return f'<div class="bar">{"".join(segs)}</div><div class="ticks">{ticks}</div>'
 
 
+# ---------------- фильтр повторов ----------------
+STOP = set("це що як для про від та або але вже його її їх при під над без через після щодо цей ця які який яка що это как для что про при уже его она они".split())
+
+
+def words(title):
+    ws = re.findall(r"[a-zа-яіїєґё0-9]+", title.lower())
+    return {w[:5] for w in ws if (len(w) >= 3 or w.isdigit()) and w not in STOP}
+
+
+def same(a, b):
+    if not a or not b:
+        return False
+    common = len(a & b)
+    return common >= 3 and common / min(len(a), len(b)) >= 0.5
+
+
+def dedupe(groups):
+    """groups: [(название источника, [новости])] по приоритету. Повторы убираем, помечаем «также в»."""
+    seen = []  # (слова, новость)
+    out = []
+    removed = 0
+    for name, items in groups:
+        kept = []
+        for it in items:
+            w = words(it["title"])
+            dup = next((orig for ow, orig in seen if same(w, ow)), None)
+            if dup is not None:
+                if name not in dup["also"]:
+                    dup["also"].append(name)
+                removed += 1
+                continue
+            it["also"] = []
+            seen.append((w, it))
+            kept.append(it)
+        out.append(kept)
+    if removed:
+        log(f"Фильтр повторов убрал: {removed}")
+    return out
+
+
 # ---------------- страница ----------------
 def sign(v):
     try:
@@ -153,7 +196,9 @@ def news_list(items, empty="Сегодня не загрузилось"):
     if not items:
         return f'<p class="sub">{empty}</p>'
     return "<ul>" + "".join(
-        f'<li><a href="{esc(i["link"])}">{esc(i["title"])}</a></li>' for i in items) + "</ul>"
+        f'<li><a href="{esc(i["link"])}">{esc(i["title"])}</a>'
+        + (f'<span class="also">также: {esc(", ".join(i["also"]))}</span>' if i.get("also") else "")
+        + "</li>" for i in items) + "</ul>"
 
 
 def build(d, feeds, channels, now):
@@ -235,7 +280,7 @@ p{{margin:4px 0}} .sub{{color:var(--sub);font-size:14px}} .small{{font-size:12px
 .ticks{{display:flex;justify-content:space-between;font-size:11px;color:var(--sub);margin-top:2px}}
 .fx{{display:flex;gap:8px;align-items:baseline;font-size:18px;font-weight:600}} .fx .cur{{color:var(--olive);width:14px}}
 .fx .sub{{font-size:13px;font-weight:400}}
-ul{{margin:0;padding-left:18px}} li{{margin:6px 0}}
+ul{{margin:0;padding-left:18px}} li{{margin:6px 0}} .also{{display:block;font-size:12px;color:var(--sub)}}
 a{{color:var(--text)}} li a{{text-decoration:none;border-bottom:1px solid var(--maybe)}}
 footer{{text-align:center;color:var(--sub);font-size:12px;margin-top:16px}}
 @media (max-width:420px){{.grid{{flex-direction:column}} .grid .half:last-child{{flex:auto}}}}
@@ -302,6 +347,9 @@ def main():
     d = load_dash()
     feeds = [(name, site, load_feed(urls)) for name, site, urls in FEEDS]
     channels = [(name, h, load_channel(h)) for name, h in CHANNELS]
+    cleaned = dedupe([(n, items) for n, _, items in feeds] + [(n, items) for n, _, items in channels])
+    feeds = [(n, site, cleaned[i]) for i, (n, site, _) in enumerate(feeds)]
+    channels = [(n, h, cleaned[len(feeds) + i]) for i, (n, h, _) in enumerate(channels)]
 
     os.makedirs("docs", exist_ok=True)
     with open("docs/index.html", "w", encoding="utf-8") as f:
