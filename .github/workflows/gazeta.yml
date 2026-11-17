@@ -2,7 +2,7 @@ name: Газета
 
 on:
   schedule:
-    - cron: "45 7 * * *"
+    - cron: "45 7 * * *"   # 7:45 UTC = 9:45 по Киеву зимой; GitHub обычно опаздывает на 5–15 минут
   workflow_dispatch:
 
 permissions:
@@ -12,8 +12,8 @@ jobs:
   gazeta:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Собрать и отправить газету
@@ -21,6 +21,9 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: "908434474"
           DASHBOARD_KEY: ${{ secrets.DASHBOARD_KEY }}
+          LUNO_URL: ${{ secrets.LUNO_URL }}
+          LUNO_ANON_KEY: ${{ secrets.LUNO_ANON_KEY }}
+          LUNO_SECRET: ${{ secrets.LUNO_SECRET }}
         run: python gazeta.py
       - name: Сохранить страницу
         run: |
