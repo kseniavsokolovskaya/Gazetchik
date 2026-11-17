@@ -1,0 +1,31 @@
+name: Газета
+
+on:
+  schedule:
+    - cron: "45 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  gazeta:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Собрать и отправить газету
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DASHBOARD_KEY: ${{ secrets.DASHBOARD_KEY }}
+        run: python gazeta.py
+      - name: Сохранить страницу
+        run: |
+          git config user.name "gazeta-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add docs
+          git commit -m "Выпуск $(date +%F)" || echo "без изменений"
+          git push
