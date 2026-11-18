@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 # strip/очистка: на случай, если в секрет случайно попали пробелы, кавычки или ```
 TOKEN = re.sub(r"[^\w:-]", "", os.environ.get("TELEGRAM_TOKEN", ""))
-CHAT = re.sub(r"[^\d-]", "", os.environ.get("TELEGRAM_CHAT_ID", "")) or "908434474"
+CHAT = re.sub(r"[^\d-]", "", os.environ.get("TELEGRAM_CHAT_ID", "")) or "370560008"
 KEY = os.environ.get("DASHBOARD_KEY", "").strip()
 LUNO_URL = os.environ.get("LUNO_URL", "").strip().rstrip("/")
 _m = re.search(r"project/([a-z0-9]{15,})", LUNO_URL) or (re.fullmatch(r"[a-z0-9]{15,}", LUNO_URL) and re.match(r"(.*)", LUNO_URL))
@@ -62,6 +62,10 @@ def load_dash():
         return {}
 
 
+# Google Новости иногда отдают не статьи, а страницы автора/рубрики — их пропускаем
+JUNK = re.compile(r"останні статті|последние статьи|всі статті|все статьи|досьє|досье|\|\s*MC:|автор[иа]? MC", re.I)
+
+
 def load_feed(urls, n=5):
     for url in urls:
         try:
@@ -70,7 +74,7 @@ def load_feed(urls, n=5):
             for it in root.iter("item"):
                 t = re.sub(r"\s+[-–—]\s+[^-–—]{2,40}$", "", (it.findtext("title") or "").strip()) if "news.google" in url else (it.findtext("title") or "").strip()
                 l = (it.findtext("link") or "").strip()
-                if t and l:
+                if t and l and not JUNK.search(t):
                     items.append({"title": t, "link": l})
                 if len(items) >= n:
                     break
