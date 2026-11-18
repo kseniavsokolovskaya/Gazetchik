@@ -1,12 +1,19 @@
 name: Газета
 
 on:
+  # Главный запуск — будильник cron-job.org в 9:50 по Киеву (через workflow_dispatch).
+  # Это запасной: если будильник не сработал, GitHub сам соберёт газету около 10:20–10:40.
+  # Если газета уже отправлена сегодня, запасной запуск ничего не делает.
   schedule:
-    - cron: "45 7 * * *"   # 7:45 UTC = 9:45 по Киеву зимой; GitHub обычно опаздывает на 5–15 минут
+    - cron: "20 8 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: gazeta
+  cancel-in-progress: false
 
 jobs:
   gazeta:
