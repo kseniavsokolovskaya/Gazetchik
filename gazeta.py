@@ -46,10 +46,10 @@ UKRAINE_TOP = 10          # сколько новостей Украины по�
 FRESH_HOURS = 26          # «свежее» = за последние сутки с запасом
 # YouTube: (название, @адрес или поиск, если адрес не известен)
 YOUTUBE = [
-    ("Безпалов Медіа", "search:Безпалов медіа"),
-    ("Як не стати овочем", "search:Як не стати овочем Оксана Мороз"),
+    ("Безпалов Медіа", "@BespaLOVmedia"),
+    ("Як не стати овочем", "@inforules-ua"),
     ("Розмова про гроші", "@rozmova_pro_groshi"),
-    ("Fancy Something", "search:Fancy Something"),
+    ("Fancy Something", "@Fancysmth"),
     ("Аліна Дейнека", "@alina_deyneka"),
 ]
 
